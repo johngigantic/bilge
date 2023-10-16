@@ -27,7 +27,7 @@ repository = "https://github.com/hecatia-elegua/bilge"
 # tested with `cargo msrv`:
 # 1.64 without let...else
 # 1.34 without cargo workspace-inheritance
-rust-version = "1.65"
+rust-version = "1.65.0"
 
 [features]
 # at bilge devs: easiest way to test nightly is by switching the

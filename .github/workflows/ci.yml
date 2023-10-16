@@ -2,56 +2,136 @@ name: CI
 
 on:
   push:
-    branches: [ "main" ]
   pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:
+  schedule: [cron: "40 1 * * *"]
+
+permissions:
+  contents: read
 
 env:
-  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
 
 jobs:
-  test-and-lint:
+  pre_ci:
+    uses: dtolnay/.github/.github/workflows/pre_ci.yml@master
+
+  test:
+    name: Tests
+    needs: pre_ci
+    if: needs.pre_ci.outputs.continue
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        toolchain:
-          - stable
-          # - beta
-          # - nightly
-          # keep this fixed to the version in rust-toolchain.toml, README.md and below
-          - nightly-2022-11-03 
-          # - 1.31.0  # find out MSRV
+    timeout-minutes: 45
     steps:
-    - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools, rustc-dev
+      - run: cargo test --all-features --release --tests
 
-    - name: Update toolchain
-      run: |
-        rustup default ${{ matrix.toolchain }}
-        rustup override set ${{ matrix.toolchain }}
-        rustup component add clippy
+  build:
+    name: ${{matrix.name || format('Rust {0}', matrix.rust)}}
+    needs: pre_ci
+    if: needs.pre_ci.outputs.continue
+    runs-on: ${{matrix.os || 'ubuntu'}}-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [stable, beta, 1.65.0]
+        include:
+          - rust: nightly
+            components: rustc-dev
+          - rust: nightly
+            name: Cortex-M
+            target: thumbv7em-none-eabi
+          - rust: nightly
+            name: Windows
+            os: windows
+    env:
+      target: ${{matrix.target && format('--target={0}', matrix.target)}}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{matrix.rust}}
+          targets: ${{matrix.target}}
+          components: ${{matrix.components}}
+      - run: cargo check ${{env.target}} --no-default-features
+      - run: cargo check ${{env.target}}
+      - if: matrix.components == 'rustc-dev'
+        run: cargo check --benches --all-features --release
 
-    - name: Show toolchain info
-      run: |
-        cargo --version --verbose
-        rustc --version
-        cargo clippy --version
+  examples:
+    name: Examples
+    needs: pre_ci
+    if: needs.pre_ci.outputs.continue
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo check --examples
 
-    - name: Lint stable
-      if: ${{ matrix.toolchain == 'stable' }}
-      run: |
-        cargo clippy --workspace -- -D warnings
+  doc:
+    name: Documentation
+    needs: pre_ci
+    if: needs.pre_ci.outputs.continue
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTDOCFLAGS: -Dwarnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/install@cargo-docs-rs
+      - run: cargo doc
+      - run: cargo test --all-features --doc
 
-    - name: Lint nightly
-      if: ${{ matrix.toolchain == 'nightly-2022-11-03' }}
-      run: |
-        cargo clippy --workspace --features nightly -- -D warnings
+  minimal:
+    name: Minimal versions
+    needs: pre_ci
+    if: needs.pre_ci.outputs.continue
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo generate-lockfile -Z minimal-versions
+      - run: cargo check --all-features --locked
 
-    - name: Test stable
-      if: ${{ matrix.toolchain == 'stable' }}
-      run: |
-        cargo test --workspace
+  miri:
+    name: Miri
+    needs: pre_ci
+    if: needs.pre_ci.outputs.continue
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@miri
+      - run: cargo miri setup
+      - run: cargo miri test --all-features
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance
 
-    - name: Test nightly
-      if: ${{ matrix.toolchain == 'nightly-2022-11-03' }}
-      run: |
-        cargo test --workspace --features nightly
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy,rustc-dev
+      - run: cargo clippy --all-features --tests --benches -- -Dclippy::all -Dclippy::pedantic
+
+  outdated:
+    name: Outdated
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/install@cargo-outdated
+      - run: cargo outdated --workspace --exit-code 1
